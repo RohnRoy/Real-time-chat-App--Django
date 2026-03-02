@@ -13,7 +13,11 @@ def user_list(request):
         .annotate(
             unread_count=Count(
                 "sent",
-                filter=Q(sent__receiver=request.user, sent__is_read=False)
+                filter=Q(
+                    sent__receiver=request.user,
+                    sent__is_read=False,
+                    sent__is_deleted=False,
+                )
             )
         )
     )

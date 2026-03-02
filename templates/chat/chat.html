@@ -11,12 +11,20 @@
     <div id="messages" class="chat-window">
         {% for m in messages %}
             <div class="message-row {% if m.sender_id == request.user.id %}mine{% else %}theirs{% endif %}">
-                <div class="message-bubble" data-message-id="{{ m.id }}" data-sender-id="{{ m.sender_id }}">
-                    <p class="message-text">{{ m.content }}</p>
+                <div class="message-bubble {% if m.is_deleted %}deleted{% endif %}" data-message-id="{{ m.id }}" data-sender-id="{{ m.sender_id }}">
+                    <div class="message-header">
+                        <p class="message-text">{% if m.is_deleted %}This message was deleted{% else %}{{ m.content }}{% endif %}</p>
+                        {% if m.sender_id == request.user.id and not m.is_deleted %}
+                            <button type="button" class="delete-message-btn" data-delete-id="{{ m.id }}">Delete</button>
+                        {% endif %}
+                    </div>
                     <div class="message-meta">
                         {{ m.timestamp|date:"H:i" }}
-                        {% if m.sender_id == request.user.id %}
+                        {% if m.sender_id == request.user.id and not m.is_deleted %}
                             <span class="tick">{% if m.is_read %}✓✓{% else %}✓{% endif %}</span>
+                        {% endif %}
+                        {% if m.is_deleted %}
+                            <span class="deleted-label">deleted</span>
                         {% endif %}
                     </div>
                 </div>
@@ -65,16 +73,51 @@ function addMessage({ message, sender_id, message_id, is_read, timestamp }) {
     wrapper.className = `message-row ${mine ? "mine" : "theirs"}`;
     const timeText = timestamp ? new Date(timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
     const tick = mine ? `<span class="tick">${is_read ? "✓✓" : "✓"}</span>` : "";
+    const deleteButton = mine ? `<button type="button" class="delete-message-btn" data-delete-id="${message_id}">Delete</button>` : "";
     const senderName = mine ? "You" : otherUsername;
 
     wrapper.innerHTML = `
         <div class="message-bubble" data-message-id="${message_id}" data-sender-id="${sender_id}">
-            <p class="message-text">${escapeHtml(message)}</p>
+            <div class="message-header">
+                <p class="message-text">${escapeHtml(message)}</p>
+                ${deleteButton}
+            </div>
             <div class="message-meta">${senderName} ${timeText} ${tick}</div>
         </div>
     `;
     messagesBox.appendChild(wrapper);
     scrollToBottom();
+}
+
+function markDeleted(messageId) {
+    const bubble = document.querySelector(`.message-bubble[data-message-id="${messageId}"]`);
+    if (!bubble) {
+        return;
+    }
+
+    bubble.classList.add("deleted");
+    const textEl = bubble.querySelector(".message-text");
+    if (textEl) {
+        textEl.textContent = "This message was deleted";
+    }
+
+    const deleteBtn = bubble.querySelector(".delete-message-btn");
+    if (deleteBtn) {
+        deleteBtn.remove();
+    }
+
+    const tick = bubble.querySelector(".tick");
+    if (tick) {
+        tick.remove();
+    }
+
+    const meta = bubble.querySelector(".message-meta");
+    if (meta && !meta.querySelector(".deleted-label")) {
+        const deletedLabel = document.createElement("span");
+        deletedLabel.className = "deleted-label";
+        deletedLabel.textContent = "deleted";
+        meta.appendChild(deletedLabel);
+    }
 }
 
 function markRead(messageId = null) {
@@ -104,6 +147,11 @@ socket.onmessage = function (e) {
         if (Number(data.receiver_id) === currentUserId) {
             socket.send(JSON.stringify({ type: "read", message_id: data.message_id }));
         }
+        return;
+    }
+
+    if (data.event === "message_deleted") {
+        markDeleted(Number(data.message_id));
     }
 };
 
@@ -116,6 +164,20 @@ sendForm.addEventListener("submit", function (event) {
     socket.send(JSON.stringify({ message: text }));
     msgInput.value = "";
     msgInput.focus();
+});
+
+messagesBox.addEventListener("click", function (event) {
+    const deleteBtn = event.target.closest(".delete-message-btn");
+    if (!deleteBtn) {
+        return;
+    }
+
+    const messageId = Number(deleteBtn.dataset.deleteId);
+    if (!messageId || socket.readyState !== WebSocket.OPEN) {
+        return;
+    }
+
+    socket.send(JSON.stringify({ type: "delete", message_id: messageId }));
 });
 
 scrollToBottom();

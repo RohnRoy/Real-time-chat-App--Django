@@ -146,6 +146,40 @@ class ChatConsumer(AsyncWebsocketConsumer):
             )
             return
 
+        if event_type == "delete":
+            message_id = data.get("message_id")
+            deleted = await self._delete_message(message_id)
+            if not deleted:
+                return
+
+            await self.channel_layer.group_send(
+                self.room,
+                {
+                    "type": "message_deleted",
+                    "event": "message_deleted",
+                    "message_id": int(message_id),
+                    "deleted_by_id": self.user.id,
+                },
+            )
+
+            unread_count = await self._unread_count(
+                sender_id=self.user.id,
+                receiver_id=self.other_user_id,
+            )
+            await self.channel_layer.group_send(
+                "users",
+                {
+                    "type": "users_update",
+                    "data": {
+                        "action": "unread_update",
+                        "sender": self.user.id,
+                        "receiver": self.other_user_id,
+                        "unread_count": unread_count,
+                    },
+                },
+            )
+            return
+
         message = data.get("message", "").strip()
 
         if not message:
@@ -203,11 +237,23 @@ class ChatConsumer(AsyncWebsocketConsumer):
             )
         )
 
+    async def message_deleted(self, event):
+        await self.send(
+            text_data=json.dumps(
+                {
+                    "event": "message_deleted",
+                    "message_id": event["message_id"],
+                    "deleted_by_id": event["deleted_by_id"],
+                }
+            )
+        )
+
     async def _mark_messages_read(self, message_id=None):
         queryset = Message.objects.filter(
             sender_id=self.other_user_id,
             receiver_id=self.user.id,
             is_read=False,
+            is_deleted=False,
         )
 
         if message_id:
@@ -220,7 +266,26 @@ class ChatConsumer(AsyncWebsocketConsumer):
             sender_id=sender_id,
             receiver_id=receiver_id,
             is_read=False,
+            is_deleted=False,
         ).acount()
+
+    async def _delete_message(self, message_id):
+        try:
+            message_id = int(message_id)
+        except (TypeError, ValueError):
+            return False
+
+        deleted = await Message.objects.filter(
+            id=message_id,
+            sender_id=self.user.id,
+            receiver_id=self.other_user_id,
+            is_deleted=False,
+        ).aupdate(
+            is_deleted=True,
+            deleted_at=timezone.now(),
+            deleted_by_id=self.user.id,
+        )
+        return bool(deleted)
 
 
 class PresenceConsumer(AsyncWebsocketConsumer):
