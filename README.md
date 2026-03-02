@@ -82,7 +82,7 @@ chat_project/
 ### 1. Clone the Repository
 
 ```bash
-git clone [<repository_url>](https://github.com/RohnRoy/Real-time-chat-App--Django.git)
+git clone https://github.com/RohnRoy/Real-time-chat-App--Django.git
 cd chat_project
 ```
 
