@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+
+{% block title %}Users{% endblock %}
+
+{% block content %}
+    <div class="row">
+        <h1>Users</h1>
+        <form method="post" action="{% url 'logout' %}">
+            {% csrf_token %}
+            <button type="submit" class="ghost">Logout</button>
+        </form>
+    </div>
+
+    <ul class="user-list">
+        {% for u in users %}
+            <li>
+                <a class="user-item" href="{% url 'chat' u.id %}">
+                    <span>
+                        {{ u.username }}
+                        <span class="status {% if u.is_online %}online{% endif %}"></span>
+                    </span>
+                    {% if u.is_online %}
+                        <span class="muted">Online</span>
+                    {% elif u.last_seen %}
+                        <span class="muted">Last seen {{ u.last_seen|date:"M d, H:i" }}</span>
+                    {% else %}
+                        <span class="muted">Offline</span>
+                    {% endif %}
+                </a>
+            </li>
+        {% empty %}
+            <li class="muted">No other users found.</li>
+        {% endfor %}
+    </ul>
+{% endblock %}

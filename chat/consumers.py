@@ -1,0 +1,123 @@
+import json
+from channels.generic.websocket import AsyncWebsocketConsumer
+from django.contrib.auth import get_user_model
+from .models import Message
+
+User = get_user_model()
+
+
+class ChatConsumer(AsyncWebsocketConsumer):
+
+    async def connect(self):
+        if self.scope["user"].is_anonymous:
+            await self.close()
+            return
+
+        self.user = self.scope["user"]
+        try:
+            self.other_user_id = int(self.scope["url_route"]["kwargs"]["user_id"])
+        except (TypeError, ValueError):
+            await self.close()
+            return
+
+        if self.other_user_id == self.user.id:
+            await self.close()
+            return
+
+        if not await User.objects.filter(id=self.other_user_id).aexists():
+            await self.close()
+            return
+
+        self.room = f"chat_{min(self.user.id, self.other_user_id)}_{max(self.user.id, self.other_user_id)}"
+
+        await self.channel_layer.group_add(self.room, self.channel_name)
+        await self.accept()
+
+        await User.objects.filter(id=self.user.id).aupdate(is_online=True, last_seen=None)
+        updated = await self._mark_messages_read()
+        if updated:
+            await self.channel_layer.group_send(
+                self.room,
+                {
+                    "type": "read_receipt",
+                    "reader_id": self.user.id,
+                    "message_id": None,
+                },
+            )
+
+    async def disconnect(self, code):
+        if hasattr(self, "room"):
+            await self.channel_layer.group_discard(self.room, self.channel_name)
+
+    async def receive(self, text_data):
+        try:
+            data = json.loads(text_data)
+        except json.JSONDecodeError:
+            return
+
+        event_type = data.get("type", "message")
+
+        if event_type == "read":
+            message_id = data.get("message_id")
+            updated = await self._mark_messages_read(message_id=message_id)
+            if updated:
+                await self.channel_layer.group_send(
+                    self.room,
+                    {
+                        "type": "read_receipt",
+                        "reader_id": self.user.id,
+                        "message_id": message_id,
+                    },
+                )
+            return
+
+        message = data.get("message", "").strip()
+
+        if not message:
+            return
+
+        receiver = await User.objects.aget(id=self.other_user_id)
+
+        msg = await Message.objects.acreate(
+            sender=self.user,
+            receiver=receiver,
+            content=message,
+        )
+
+        await self.channel_layer.group_send(
+            self.room,
+            {
+                "type": "chat_message",
+                "event": "chat_message",
+                "message": message,
+                "sender_id": self.user.id,
+                "receiver_id": receiver.id,
+                "message_id": msg.id,
+                "is_read": msg.is_read,
+                "timestamp": msg.timestamp.isoformat(),
+            },
+        )
+
+    async def chat_message(self, event):
+        await self.send(text_data=json.dumps(event))
+
+    async def read_receipt(self, event):
+        await self.send(
+            text_data=json.dumps(
+                {
+                    "event": "read_receipt",
+                    "reader_id": event["reader_id"],
+                    "message_id": event["message_id"],
+                }
+            )
+        )
+
+    async def _mark_messages_read(self, message_id=None):
+        queryset = Message.objects.filter(
+            sender_id=self.other_user_id,
+            receiver_id=self.user.id,
+            is_read=False,
+        )
+        if message_id:
+            queryset = queryset.filter(id=message_id)
+        return await queryset.aupdate(is_read=True)

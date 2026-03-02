@@ -1,0 +1,123 @@
+{% extends "base.html" %}
+
+{% block title %}Chat{% endblock %}
+
+{% block content %}
+    <div class="row">
+        <h1>Chat with {{ other_user.username }}</h1>
+        <a href="{% url 'user_list' %}" class="muted">Back</a>
+    </div>
+
+    <div id="messages" class="chat-window">
+        {% for m in messages %}
+            <div class="message-row {% if m.sender_id == request.user.id %}mine{% else %}theirs{% endif %}">
+                <div class="message-bubble" data-message-id="{{ m.id }}" data-sender-id="{{ m.sender_id }}">
+                    <p class="message-text">{{ m.content }}</p>
+                    <div class="message-meta">
+                        {{ m.timestamp|date:"H:i" }}
+                        {% if m.sender_id == request.user.id %}
+                            <span class="tick">{% if m.is_read %}✓✓{% else %}✓{% endif %}</span>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+        {% endfor %}
+    </div>
+
+    <form id="send-form" class="composer">
+        <input id="msg" autocomplete="off" placeholder="Type a message..." />
+        <button type="submit">Send</button>
+    </form>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const currentUserId = Number("{{ request.user.id }}");
+const otherUserId = Number("{{ other_user.id }}");
+const otherUsername = "{{ other_user.username|escapejs }}";
+const messagesBox = document.getElementById("messages");
+const msgInput = document.getElementById("msg");
+const sendForm = document.getElementById("send-form");
+const socketScheme = window.location.protocol === "https:" ? "wss" : "ws";
+
+const socket = new WebSocket(
+    `${socketScheme}://${window.location.host}/ws/chat/${otherUserId}/`
+);
+
+function scrollToBottom() {
+    messagesBox.scrollTop = messagesBox.scrollHeight;
+}
+
+function escapeHtml(text) {
+    const map = {
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        "\"": "&quot;",
+        "'": "&#039;",
+    };
+    return String(text).replace(/[&<>"']/g, (m) => map[m]);
+}
+
+function addMessage({ message, sender_id, message_id, is_read, timestamp }) {
+    const mine = Number(sender_id) === currentUserId;
+    const wrapper = document.createElement("div");
+    wrapper.className = `message-row ${mine ? "mine" : "theirs"}`;
+    const timeText = timestamp ? new Date(timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
+    const tick = mine ? `<span class="tick">${is_read ? "✓✓" : "✓"}</span>` : "";
+    const senderName = mine ? "You" : otherUsername;
+
+    wrapper.innerHTML = `
+        <div class="message-bubble" data-message-id="${message_id}" data-sender-id="${sender_id}">
+            <p class="message-text">${escapeHtml(message)}</p>
+            <div class="message-meta">${senderName} ${timeText} ${tick}</div>
+        </div>
+    `;
+    messagesBox.appendChild(wrapper);
+    scrollToBottom();
+}
+
+function markRead(messageId = null) {
+    const selector = messageId
+        ? `.message-bubble[data-message-id="${messageId}"] .tick`
+        : `.message-bubble[data-sender-id="${currentUserId}"] .tick`;
+    document.querySelectorAll(selector).forEach((tick) => {
+        tick.textContent = "✓✓";
+    });
+}
+
+socket.onopen = function () {
+    socket.send(JSON.stringify({ type: "read" }));
+};
+
+socket.onmessage = function (e) {
+    const data = JSON.parse(e.data);
+    if (data.event === "read_receipt") {
+        if (Number(data.reader_id) === otherUserId) {
+            markRead(data.message_id);
+        }
+        return;
+    }
+
+    if (data.event === "chat_message") {
+        addMessage(data);
+        if (Number(data.receiver_id) === currentUserId) {
+            socket.send(JSON.stringify({ type: "read", message_id: data.message_id }));
+        }
+    }
+};
+
+sendForm.addEventListener("submit", function (event) {
+    event.preventDefault();
+    const text = msgInput.value.trim();
+    if (!text || socket.readyState !== WebSocket.OPEN) {
+        return;
+    }
+    socket.send(JSON.stringify({ message: text }));
+    msgInput.value = "";
+    msgInput.focus();
+});
+
+scrollToBottom();
+</script>
+{% endblock %}
