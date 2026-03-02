@@ -1,6 +1,7 @@
 import json
 from channels.generic.websocket import AsyncWebsocketConsumer
 from django.contrib.auth import get_user_model
+from django.utils import timezone
 from .models import Message
 
 User = get_user_model()
@@ -33,21 +34,76 @@ class ChatConsumer(AsyncWebsocketConsumer):
         await self.channel_layer.group_add(self.room, self.channel_name)
         await self.accept()
 
-        await User.objects.filter(id=self.user.id).aupdate(is_online=True, last_seen=None)
-        updated = await self._mark_messages_read()
-        if updated:
-            await self.channel_layer.group_send(
-                self.room,
-                {
-                    "type": "read_receipt",
-                    "reader_id": self.user.id,
-                    "message_id": None,
+        await User.objects.filter(id=self.user.id).aupdate(
+            is_online=True,
+            last_seen=None,
+        )
+
+        await self.channel_layer.group_send(
+            "users",
+            {
+                "type": "users_update",
+                "data": {
+                    "action": "presence",
+                    "user_id": self.user.id,
+                    "is_online": True,
+                    "last_seen": None,
                 },
-            )
+            },
+        )
+
+        await self._mark_messages_read()
+        await self.channel_layer.group_send(
+            self.room,
+            {
+                "type": "read_receipt",
+                "reader_id": self.user.id,
+                "message_id": None,
+            },
+        )
+
+        unread_count = await self._unread_count(
+            sender_id=self.other_user_id,
+            receiver_id=self.user.id,
+        )
+        await self.channel_layer.group_send(
+            "users",
+            {
+                "type": "users_update",
+                "data": {
+                    "action": "unread_update",
+                    "sender": self.other_user_id,
+                    "receiver": self.user.id,
+                    "unread_count": unread_count,
+                },
+            },
+        )
 
     async def disconnect(self, code):
         if hasattr(self, "room"):
             await self.channel_layer.group_discard(self.room, self.channel_name)
+
+        if not hasattr(self, "user"):
+            return
+
+        now = timezone.now()
+        await User.objects.filter(id=self.user.id).aupdate(
+            is_online=False,
+            last_seen=now,
+        )
+
+        await self.channel_layer.group_send(
+            "users",
+            {
+                "type": "users_update",
+                "data": {
+                    "action": "presence",
+                    "user_id": self.user.id,
+                    "is_online": False,
+                    "last_seen": now.isoformat(),
+                },
+            },
+        )
 
     async def receive(self, text_data):
         try:
@@ -59,7 +115,9 @@ class ChatConsumer(AsyncWebsocketConsumer):
 
         if event_type == "read":
             message_id = data.get("message_id")
-            updated = await self._mark_messages_read(message_id=message_id)
+
+            updated = await self._mark_messages_read(message_id)
+
             if updated:
                 await self.channel_layer.group_send(
                     self.room,
@@ -69,6 +127,23 @@ class ChatConsumer(AsyncWebsocketConsumer):
                         "message_id": message_id,
                     },
                 )
+
+            unread_count = await self._unread_count(
+                sender_id=self.other_user_id,
+                receiver_id=self.user.id,
+            )
+            await self.channel_layer.group_send(
+                "users",
+                {
+                    "type": "users_update",
+                    "data": {
+                        "action": "unread_update",
+                        "sender": self.other_user_id,
+                        "receiver": self.user.id,
+                        "unread_count": unread_count,
+                    },
+                },
+            )
             return
 
         message = data.get("message", "").strip()
@@ -98,6 +173,22 @@ class ChatConsumer(AsyncWebsocketConsumer):
             },
         )
 
+        await self.channel_layer.group_send(
+            "users",
+            {
+                "type": "users_update",
+                "data": {
+                    "action": "new_message",
+                    "sender": self.user.id,
+                    "receiver": receiver.id,
+                    "unread_count": await self._unread_count(
+                        sender_id=self.user.id,
+                        receiver_id=receiver.id,
+                    ),
+                },
+            },
+        )
+
     async def chat_message(self, event):
         await self.send(text_data=json.dumps(event))
 
@@ -118,6 +209,65 @@ class ChatConsumer(AsyncWebsocketConsumer):
             receiver_id=self.user.id,
             is_read=False,
         )
+
         if message_id:
             queryset = queryset.filter(id=message_id)
+
         return await queryset.aupdate(is_read=True)
+
+    async def _unread_count(self, sender_id, receiver_id):
+        return await Message.objects.filter(
+            sender_id=sender_id,
+            receiver_id=receiver_id,
+            is_read=False,
+        ).acount()
+
+
+class PresenceConsumer(AsyncWebsocketConsumer):
+
+    async def connect(self):
+        if self.scope["user"].is_anonymous:
+            await self.close()
+            return
+
+        self.user = self.scope["user"]
+
+        await self.channel_layer.group_add("users", self.channel_name)
+        await self.accept()
+
+        await User.objects.filter(id=self.user.id).aupdate(is_online=True, last_seen=None)
+        await self.channel_layer.group_send(
+            "users",
+            {
+                "type": "users_update",
+                "data": {
+                    "action": "presence",
+                    "user_id": self.user.id,
+                    "is_online": True,
+                    "last_seen": None,
+                },
+            },
+        )
+
+    async def disconnect(self, code):
+        await self.channel_layer.group_discard("users", self.channel_name)
+        if not hasattr(self, "user"):
+            return
+
+        now = timezone.now()
+        await User.objects.filter(id=self.user.id).aupdate(is_online=False, last_seen=now)
+        await self.channel_layer.group_send(
+            "users",
+            {
+                "type": "users_update",
+                "data": {
+                    "action": "presence",
+                    "user_id": self.user.id,
+                    "is_online": False,
+                    "last_seen": now.isoformat(),
+                },
+            },
+        )
+
+    async def users_update(self, event):
+        await self.send(text_data=json.dumps(event["data"]))

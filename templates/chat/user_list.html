@@ -17,19 +17,97 @@
                 <a class="user-item" href="{% url 'chat' u.id %}">
                     <span>
                         {{ u.username }}
-                        <span class="status {% if u.is_online %}online{% endif %}"></span>
+                        <span class="status {% if u.is_online %}online{% endif %}" data-status-dot="{{ u.id }}"></span>
                     </span>
-                    {% if u.is_online %}
-                        <span class="muted">Online</span>
-                    {% elif u.last_seen %}
-                        <span class="muted">Last seen {{ u.last_seen|date:"M d, H:i" }}</span>
-                    {% else %}
-                        <span class="muted">Offline</span>
-                    {% endif %}
+                    <span class="muted" data-presence-text="{{ u.id }}">
+                        {% if u.is_online %}
+                            Online
+                        {% elif u.last_seen %}
+                            Last seen {{ u.last_seen|date:"M d, H:i" }}
+                        {% else %}
+                            Offline
+                        {% endif %}
+                    </span>
+                    <span class="unread-badge {% if u.unread_count == 0 %}hidden{% endif %}" data-unread-badge="{{ u.id }}">
+                        {{ u.unread_count }}
+                    </span>
                 </a>
             </li>
         {% empty %}
             <li class="muted">No other users found.</li>
         {% endfor %}
     </ul>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const currentUserId = Number("{{ request.user.id }}");
+const socketScheme = window.location.protocol === "https:" ? "wss" : "ws";
+const socket = new WebSocket(`${socketScheme}://${window.location.host}/ws/users/`);
+
+function formatLastSeen(lastSeenIso) {
+    const date = new Date(lastSeenIso);
+    if (Number.isNaN(date.getTime())) {
+        return "Offline";
+    }
+    const human = date.toLocaleString([], {
+        month: "short",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+    });
+    return `Last seen ${human}`;
+}
+
+function setPresence(userId, isOnline, lastSeenIso) {
+    const statusDot = document.querySelector(`[data-status-dot="${userId}"]`);
+    const presenceText = document.querySelector(`[data-presence-text="${userId}"]`);
+    if (!statusDot || !presenceText) {
+        return;
+    }
+
+    if (isOnline) {
+        statusDot.classList.add("online");
+        presenceText.textContent = "Online";
+        return;
+    }
+
+    statusDot.classList.remove("online");
+    presenceText.textContent = lastSeenIso ? formatLastSeen(lastSeenIso) : "Offline";
+}
+
+function setUnreadCount(senderId, unreadCount) {
+    const badge = document.querySelector(`[data-unread-badge="${senderId}"]`);
+    if (!badge) {
+        return;
+    }
+
+    if (unreadCount > 0) {
+        badge.textContent = String(unreadCount);
+        badge.classList.remove("hidden");
+        return;
+    }
+
+    badge.textContent = "0";
+    badge.classList.add("hidden");
+}
+
+socket.onmessage = function (event) {
+    const data = JSON.parse(event.data);
+
+    if (data.action === "presence") {
+        setPresence(Number(data.user_id), Boolean(data.is_online), data.last_seen);
+        return;
+    }
+
+    if (data.action === "new_message" && Number(data.receiver) === currentUserId) {
+        setUnreadCount(Number(data.sender), Number(data.unread_count || 0));
+        return;
+    }
+
+    if (data.action === "unread_update" && Number(data.receiver) === currentUserId) {
+        setUnreadCount(Number(data.sender), Number(data.unread_count || 0));
+    }
+};
+</script>
 {% endblock %}

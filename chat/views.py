@@ -1,12 +1,23 @@
 from django.contrib.auth.decorators import login_required
 from django.shortcuts import render, get_object_or_404
 from accounts.models import User
+from django.db.models import Count, Q
 from .models import Message
 
 
 @login_required
 def user_list(request):
-    users = User.objects.exclude(id=request.user.id)
+    users = (
+        User.objects
+        .exclude(id=request.user.id)
+        .annotate(
+            unread_count=Count(
+                "sent",
+                filter=Q(sent__receiver=request.user, sent__is_read=False)
+            )
+        )
+    )
+
     return render(request, "chat/user_list.html", {"users": users})
 
 
@@ -18,12 +29,6 @@ def chat_view(request, user_id):
         sender__in=[request.user, other_user],
         receiver__in=[request.user, other_user],
     ).order_by("timestamp")
-
-    Message.objects.filter(
-        sender=other_user,
-        receiver=request.user,
-        is_read=False,
-    ).update(is_read=True)
 
     return render(
         request,
